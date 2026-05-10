@@ -1,0 +1,6 @@
+{
+  "name": "周港茶點單系統",
+  "description": "茶飲點單系統，包含前台顧客點單與後台管理，並使用 Firebase 儲存資料。",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
