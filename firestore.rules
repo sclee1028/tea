@@ -1,0 +1,102 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Phase 0: Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Phase 3: Primitives
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null && request.auth.token.email_verified == true;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid));
+    }
+
+    // Phase 2: Entities
+    // Admins Collection
+    function isValidAdmin(data) {
+      return data.keys().hasAll(['email', 'createdAt'])
+        && data.keys().size() == 2
+        && data.email is string && data.email.size() <= 200
+        && data.createdAt == request.time;
+    }
+
+    match /admins/{adminId} {
+      allow get: if isSignedIn() && request.auth.uid == adminId;
+      allow list: if isAdmin();
+      allow create: if false; // Admins must be added via Firebase Console or custom script initially
+      allow update, delete: if false; // Immutable in client
+    }
+
+    // Orders Collection
+    function isValidOrder(data) {
+      return data.keys().hasAll(['userId', 'customerName', 'customerPhone', 'items', 'totalPrice', 'status', 'createdAt', 'updatedAt'])
+        && data.keys().size() == 8
+        && data.userId is string && data.userId == request.auth.uid
+        && data.customerName is string && data.customerName.size() <= 100
+        && data.customerPhone is string && data.customerPhone.size() <= 20
+        && data.items is list && data.items.size() > 0 && data.items.size() <= 50
+        // rudimentary array check on first item
+        && data.items[0] is map
+        && data.totalPrice is number && data.totalPrice >= 0
+        && data.status is string && data.status in ['pending', 'preparing', 'completed', 'cancelled']
+        && data.createdAt == request.time
+        && data.updatedAt == request.time;
+    }
+
+    // Is client cancelling order?
+    function isCustomerCancelAction() {
+      return incoming().status == 'cancelled' 
+        && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']);
+    }
+
+    // Is admin updating status?
+    function isAdminStatusUpdateAction() {
+      return incoming().status in ['pending', 'preparing', 'completed', 'cancelled']
+        && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']);
+    }
+
+    match /orders/{orderId} {
+      // Must be a valid document ID
+      allow get, list: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      
+      allow create: if isSignedIn() 
+        && isValidId(orderId) 
+        && isValidOrder(incoming())
+        && incoming().status == 'pending'; // New orders must be pending
+        
+      allow update: if isSignedIn() 
+        && isValidId(orderId) 
+        && isValidOrder(incoming()) // CRITICAL: The validation helper must wrap the entire update logic
+        && (
+          (
+            isAdmin() 
+            && isAdminStatusUpdateAction()
+          ) || 
+          (
+            existing().userId == request.auth.uid 
+            && existing().status == 'pending'
+            && isCustomerCancelAction()
+          )
+        );
+        
+      allow delete: if false; // Do not allow deletion of orders, only cancellation
+    }
+  }
+}
